@@ -615,6 +615,7 @@
   "adapter.type.pan115": "115 网盘（Cookie）",
   "adapter.type.cloud189": "天翼云盘",
   "adapter.type.smb": "SMB 共享",
+  "Guest access": "访客访问",
   "adapter.type.seafile": "Seafile",
   "adapter.type.cloudreve": "Cloudreve V4",
   "adapter.type.alist": "AList",

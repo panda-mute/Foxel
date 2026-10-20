@@ -19,8 +19,13 @@ class SMBAdapter:
         cfg = record.config or {}
         self.server = str(cfg.get("server") or cfg.get("address") or "").strip()
         self.share = str(cfg.get("share") or cfg.get("share_name") or "").strip("/")
-        self.username = cfg.get("username") or ""
-        self.password = cfg.get("password") or ""
+        self.guest = bool(cfg.get("guest", False))
+        if self.guest:
+            self.username = cfg.get("username") or "guest"
+            self.password = cfg.get("password") or "guest"
+        else:
+            self.username = cfg.get("username") or ""
+            self.password = cfg.get("password") or ""
         self.root = clean_path(cfg.get("root") or "")
         self.timeout = float(cfg.get("timeout", 30))
         self.port = int(cfg.get("port", 445))
@@ -31,6 +36,9 @@ class SMBAdapter:
         self.base = "\\\\" + self.server.strip("\\/") + "\\" + self.share.replace("/", "\\")
         self._options = {"username": self.username, "password": self.password, "port": self.port,
                          "connection_timeout": self.timeout, "connection_cache": {}}
+        if self.guest:
+            # Guest sessions are negotiated after failed credentials and cannot sign or encrypt.
+            self._options.update(auth_protocol="ntlm", encrypt=False, require_signing=False)
 
     def get_effective_root(self, sub_path):
         return "/".join(filter(None, (self.root, clean_path(sub_path))))
@@ -209,6 +217,7 @@ CONFIG_SCHEMA = [
     {"key": "server", "label": "Server", "type": "string", "required": True, "placeholder": "nas.example.com"},
     {"key": "share", "label": "Share name", "type": "string", "required": True},
     {"key": "port", "label": "Port", "type": "number", "default": 445},
+    {"key": "guest", "label": "Guest access", "type": "boolean", "default": False},
     {"key": "username", "label": "Username", "type": "string", "required": False},
     {"key": "password", "label": "Password", "type": "password", "required": False},
     {"key": "root", "label": "Root directory", "type": "string", "default": "/"},
