@@ -2,6 +2,7 @@ from typing import List, Dict, Tuple, AsyncIterator, Optional
 import asyncio
 import base64
 import io
+import mimetypes
 import os
 import struct
 import time
@@ -327,7 +328,11 @@ class TelegramAdapter:
                         if message.text and '.' in message.text and len(message.text) < 256 and '\n' not in message.text:
                             filename = message.text
                         else:
-                            filename = f"unknown_{message.id}"
+                            mime_type = self._get_message_mime_type(message, media)
+                            extension = mimetypes.guess_extension(mime_type, strict=False) or ""
+                            if extension == ".jpe":
+                                extension = ".jpg"
+                            filename = f"unknown_{message.id}{extension}"
 
                     size = file_meta.size
                     if size is None:
