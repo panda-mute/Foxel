@@ -29,7 +29,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          latest_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name' 2>/dev/null || true)"
+          latest_tag="$(gh release list \
+            --repo "$GITHUB_REPOSITORY" \
+            --exclude-drafts \
+            --exclude-pre-releases \
+            --limit 1 \
+            --json tagName \
+            --jq '.[0].tagName // ""')"
 
           if [ -n "$latest_tag" ]; then
             commits_json="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${latest_tag}...${HEAD_SHA}" --jq '.commits')"
