@@ -930,5 +930,9 @@
   "Task queued": "Task queued",
   "Task failed": "Task failed",
   "Task timeout": "Task timeout",
-  "Compress": "Compress"
+  "Compress": "Compress",
+  "Semantic search failed": "Semantic search failed",
+  "Keyword search failed": "Keyword search failed",
+  "Output directory": "Output directory",
+  "Save each file to this directory; leave blank to only return results": "Save each file to this directory; leave blank to only return results"
 }
