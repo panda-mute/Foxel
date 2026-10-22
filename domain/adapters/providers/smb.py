@@ -51,9 +51,11 @@ class SMBAdapter:
     async def _call(self, func, *args, **kwargs):
         return await asyncio.to_thread(func, *args, **kwargs)
 
-    async def _smb_call(self, func, *args, **kwargs):
+    async def _smb_call(self, func, *args, with_options=True, **kwargs):
         async with self._operation_lock:
-            return await asyncio.to_thread(func, *args, **kwargs, **self._options)
+            if with_options:
+                kwargs = {**kwargs, **self._options}
+            return await asyncio.to_thread(func, *args, **kwargs)
 
     async def list_dir(self, root, rel, page_num=1, page_size=50, sort_by="name", sort_order="asc"):
         path = self._path(root, rel)
@@ -65,7 +67,7 @@ class SMBAdapter:
                     is_dir = statmod.S_ISDIR(info.st_mode)
                     result.append(entry(item.name, is_dir, info.st_size, info.st_mtime, path=item.path))
             return result
-        items = await self._smb_call(scan)
+        items = await self._smb_call(scan, with_options=False)
         return paginate(items, page_num, page_size, sort_by, sort_order)
 
     async def stat_file(self, root, rel):
@@ -96,7 +98,7 @@ class SMBAdapter:
         def read():
             with smbclient.open_file(path, mode="rb", **self._options) as file:
                 return file.read()
-        return await self._smb_call(read)
+        return await self._smb_call(read, with_options=False)
 
     async def stream_file(self, root, rel, range_header):
         item = await self.stat_file(root, rel)
