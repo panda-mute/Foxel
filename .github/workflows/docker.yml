@@ -49,16 +49,17 @@ jobs:
         run: |
           if [[ -n "$IMAGE_TAG" ]]; then
             DOCKER_TAGS="ghcr.io/${REPO_LC}:${IMAGE_TAG}"
-            if [[ "$IMAGE_TAG" != "latest" ]]; then
-              DOCKER_TAGS="${DOCKER_TAGS},ghcr.io/${REPO_LC}:latest"
-            fi
-            echo "DOCKER_TAGS=${DOCKER_TAGS}" >> "$GITHUB_ENV"
           elif [[ $GITHUB_REF == refs/tags/* ]]; then
             VERSION=${GITHUB_REF#refs/tags/}
-            echo "DOCKER_TAGS=ghcr.io/${REPO_LC}:${VERSION},ghcr.io/${REPO_LC}:latest" >> $GITHUB_ENV
+            DOCKER_TAGS="ghcr.io/${REPO_LC}:${VERSION}"
           else
-            echo "DOCKER_TAGS=ghcr.io/${REPO_LC}:dev,ghcr.io/${REPO_LC}:latest" >> $GITHUB_ENV
+            DOCKER_TAGS="ghcr.io/${REPO_LC}:dev"
           fi
+          # Only main and release tags move :latest, which users pull by default.
+          if [[ $GITHUB_REF == refs/tags/* || ( $GITHUB_REF == refs/heads/main && "$IMAGE_TAG" != "latest" ) ]]; then
+            DOCKER_TAGS="${DOCKER_TAGS},ghcr.io/${REPO_LC}:latest"
+          fi
+          echo "DOCKER_TAGS=${DOCKER_TAGS}" >> "$GITHUB_ENV"
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
