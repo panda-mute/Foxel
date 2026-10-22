@@ -53,6 +53,33 @@ CONFIG_SCHEMA = [
     {"key": "proxy_port", "label": "代理端口", "type": "number", "required": False, "placeholder": "例如: 1080"},
 ]
 
+class _AlignedDownload:
+    """Wraps a Telethon download started at an aligned offset and drops the leading bytes."""
+
+    def __init__(self, inner, skip: int):
+        self._inner = inner
+        self._skip = skip
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        while True:
+            chunk = await self._inner.__anext__()
+            if self._skip:
+                if len(chunk) <= self._skip:
+                    self._skip -= len(chunk)
+                    continue
+                chunk = chunk[self._skip:]
+                self._skip = 0
+            return chunk
+
+    async def close(self):
+        close = getattr(self._inner, "close", None)
+        if callable(close):
+            await close()
+
+
 class TelegramAdapter:
     """Telegram 存储适配器 (使用用户 Session)"""
     supports_directories = False
@@ -390,6 +417,20 @@ class TelegramAdapter:
             await self._disconnect_shared_client()
             raise self._flood_wait_http_exception(exc)
 
+    def _iter_download_from(self, client, media, start: int, file_size: int):
+        # Telegram rejects a request that crosses a 1 MB boundary (LIMIT_INVALID). Telethon's own
+        # alignment check can pick such offsets (e.g. 15.75 MB with 512 KB requests), so always
+        # start on a chunk boundary, which divides 1 MB, and skip the extra bytes here.
+        aligned = start - start % self._download_chunk_size
+        inner = client.iter_download(
+            media,
+            offset=aligned,
+            request_size=self._download_chunk_size,
+            chunk_size=self._download_chunk_size,
+            file_size=file_size or None,
+        )
+        return _AlignedDownload(inner, start - aligned)
+
     async def read_file_range(self, root: str, rel: str, start: int, end: Optional[int] = None) -> bytes:
         return await self._read_range(rel, start, end, self._download_lock, disconnect_on_flood=True)
 
@@ -427,13 +468,7 @@ class TelegramAdapter:
         data = bytearray()
         try:
             async with gate:
-                async for chunk in client.iter_download(
-                    media,
-                    offset=start,
-                    request_size=self._download_chunk_size,
-                    chunk_size=self._download_chunk_size,
-                    file_size=file_size or None,
-                ):
+                async for chunk in self._iter_download_from(client, media, start, file_size):
                     if not chunk:
                         continue
                     need = limit - len(data)
@@ -648,13 +683,7 @@ class TelegramAdapter:
                     limit = end - start + 1
                     if self._active_stream_message_id != message_id:
                         return
-                    chunks = client.iter_download(
-                        media,
-                        offset=start,
-                        request_size=self._download_chunk_size,
-                        chunk_size=self._download_chunk_size,
-                        file_size=file_size,
-                    )
+                    chunks = self._iter_download_from(client, media, start, file_size)
                     try:
                         while True:
                             # Hold the lock only while fetching from Telegram, never across a yield:
