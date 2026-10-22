@@ -688,7 +688,7 @@ class VectorIndexProcessor:
         if file_ext in IMAGE_EXTENSIONS:
             await ensure_vector_collection()
             file_bytes = await ensure_input_bytes()
-            processed_bytes, compression = _compress_image_for_embedding(file_bytes)
+            processed_bytes, compression = await asyncio.to_thread(_compress_image_for_embedding, file_bytes)
             base64_image = base64.b64encode(processed_bytes).decode("utf-8")
             description = await describe_image_base64(base64_image)
             embedding = await get_text_embedding(description)

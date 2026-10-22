@@ -55,7 +55,6 @@ CONFIG_SCHEMA = [
 class TelegramAdapter:
     """Telegram 存储适配器 (使用用户 Session)"""
     supports_directories = False
-    native_video_thumbnail_only = True
     _message_cache_ttl = 300
     _message_cache_limit = 200
     _download_chunk_size = 512 * 1024
@@ -94,6 +93,8 @@ class TelegramAdapter:
         self._client: TelegramClient | None = None
         self._client_lock = asyncio.Lock()
         self._download_lock = asyncio.Lock()
+        # Thumbnails are small one-shot downloads; they must not queue behind long video streams.
+        self._thumb_semaphore = asyncio.Semaphore(4)
         self._active_stream_message_id: int | None = None
         self._message_cache: Dict[int, Tuple[float, object]] = {}
 
@@ -213,19 +214,23 @@ class TelegramAdapter:
     def _clear_message_cache(self):
         self._message_cache.clear()
 
+    def _remember_message(self, message) -> None:
+        if not message:
+            return
+        if len(self._message_cache) >= self._message_cache_limit and message.id not in self._message_cache:
+            oldest_key = min(self._message_cache, key=lambda k: self._message_cache[k][0])
+            self._message_cache.pop(oldest_key, None)
+        self._message_cache[message.id] = (time.monotonic() + self._message_cache_ttl, message)
+
     async def _get_cached_message(self, message_id: int):
-        now = time.monotonic()
         cached = self._message_cache.get(message_id)
-        if cached and cached[0] > now:
+        if cached and cached[0] > time.monotonic():
             return cached[1]
 
         client = await self._get_connected_client()
         message = await client.get_messages(self.chat_id, ids=message_id)
         if message:
-            if len(self._message_cache) >= self._message_cache_limit:
-                oldest_key = min(self._message_cache, key=lambda k: self._message_cache[k][0])
-                self._message_cache.pop(oldest_key, None)
-            self._message_cache[message_id] = (now + self._message_cache_ttl, message)
+            self._remember_message(message)
         else:
             self._message_cache.pop(message_id, None)
         return message
@@ -314,6 +319,8 @@ class TelegramAdapter:
                 for message in messages:
                     if not message:
                         continue
+                    # Warm the cache so thumbnail requests for these rows skip a get_messages round trip.
+                    self._remember_message(message)
 
                     media = message.document or message.video or message.photo
                     if not media:
@@ -529,10 +536,12 @@ class TelegramAdapter:
             raise FileNotFoundError(rel)
         thumb = self._pick_photo_thumb(self._get_message_thumbs(message))
         if thumb is None:
+            print(f"Telegram message {message_id} has no usable thumb: "
+                  f"{[type(t).__name__ for t in self._get_message_thumbs(message)]}")
             return None
         client = await self._get_connected_client()
         try:
-            async with self._download_lock:
+            async with self._thumb_semaphore:
                 return await client.download_media(message, file=bytes, thumb=thumb)
         except errors.FloodWaitError as exc:
             await self._disconnect_shared_client()

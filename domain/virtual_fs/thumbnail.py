@@ -73,8 +73,11 @@ def _image_to_webp(im, w: int, h: int, fit: str) -> Tuple[bytes, str]:
     return buf.getvalue(), 'image/webp'
 
 
-def _load_image_with_pillow(data: bytes):
+def _load_image_with_pillow(data: bytes, target: Tuple[int, int] | None = None):
     im = Image.open(io.BytesIO(data))
+    if target is not None:
+        # JPEG can decode at 1/2, 1/4 or 1/8 scale; draft keeps the result at least target-sized.
+        im.draft("RGB", target)
     im.load()
     return im
 
@@ -128,13 +131,14 @@ def _load_raw_with_ffmpeg(data: bytes, filename: str | None) -> "Image.Image":
                 Path(src_path).unlink()
 
 
-def load_image_from_bytes(data: bytes, *, filename: str | None = None, is_raw: bool = False):
+def load_image_from_bytes(data: bytes, *, filename: str | None = None, is_raw: bool = False,
+                          target: Tuple[int, int] | None = None):
     if not is_raw:
-        return _load_image_with_pillow(data)
+        return _load_image_with_pillow(data, target)
 
     first_error: Exception | None = None
     try:
-        return _load_image_with_pillow(data)
+        return _load_image_with_pillow(data, target)
     except Exception as exc:
         first_error = exc
 
@@ -157,7 +161,7 @@ def raw_bytes_to_jpeg(data: bytes, filename: str | None = None) -> bytes:
 
 
 def generate_thumb(data: bytes, w: int, h: int, fit: str, is_raw: bool = False, filename: str | None = None) -> Tuple[bytes, str]:
-    im = load_image_from_bytes(data, filename=filename, is_raw=is_raw)
+    im = load_image_from_bytes(data, filename=filename, is_raw=is_raw, target=(w, h))
     return _image_to_webp(im, w, h, fit)
 
 
@@ -410,9 +414,6 @@ async def get_or_create_thumb(adapter, adapter_id: int, root: str, rel: str, w: 
                     f"Failed to convert native thumbnail to WebP: {e}, falling back.")
                 thumb_bytes, mime = None, None
 
-        if is_video and getattr(adapter, "native_video_thumbnail_only", False) and not thumb_bytes:
-            raise HTTPException(404, detail="Native video thumbnail unavailable")
-
     if not thumb_bytes:
         if is_video:
             async def _maybe_transcoding_thumb() -> Tuple[bytes, str] | None:
@@ -497,8 +498,8 @@ async def get_or_create_thumb(adapter, adapter_id: int, root: str, rel: str, w: 
                 raise HTTPException(400, detail="Image too large for thumbnail")
             read_data = await adapter.read_file(root, rel)
             try:
-                thumb_bytes, mime = generate_thumb(
-                    read_data, w, h, fit, is_raw=is_raw_filename(rel), filename=rel)
+                thumb_bytes, mime = await asyncio.to_thread(
+                    generate_thumb, read_data, w, h, fit, is_raw=is_raw_filename(rel), filename=rel)
             except Exception as e:
                 print(e)
                 raise HTTPException(

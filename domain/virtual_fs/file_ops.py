@@ -1,3 +1,4 @@
+import asyncio
 import mimetypes
 from typing import Any, AsyncIterator, Union
 
@@ -123,7 +124,7 @@ class VirtualFSFileOpsMixin(VirtualFSListingMixin):
         if is_raw_filename(rel):
             try:
                 raw_data = await cls.read_file(path)
-                content = raw_bytes_to_jpeg(raw_data, filename=rel)
+                content = await asyncio.to_thread(raw_bytes_to_jpeg, raw_data, filename=rel)
                 return Response(content=content, media_type="image/jpeg")
             except Exception as exc:
                 raise HTTPException(500, detail=f"RAW file processing failed: {exc}")

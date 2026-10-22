@@ -1,3 +1,4 @@
+import asyncio
 import mimetypes
 import re
 from urllib.parse import quote
@@ -27,7 +28,7 @@ class VirtualFSRouteMixin(VirtualFSTempLinkMixin):
         if is_raw_filename(full_path):
             try:
                 raw_data = await cls.read_file(full_path)
-                content = raw_bytes_to_jpeg(raw_data, filename=full_path)
+                content = await asyncio.to_thread(raw_bytes_to_jpeg, raw_data, filename=full_path)
                 return Response(content=content, media_type="image/jpeg")
             except FileNotFoundError:
                 raise HTTPException(404, detail="File not found")

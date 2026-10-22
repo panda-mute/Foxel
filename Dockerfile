@@ -46,7 +46,15 @@ COPY --from=python-builder /build/migrate /app/migrate
 
 RUN /opt/venv/bin/python -c "from tortoise import Tortoise, exceptions; import gunicorn; from uvicorn.workers import UvicornWorker"
 
-COPY . .
+COPY main.py THIRD_PARTY_NOTICES.md ./
+COPY api ./api
+COPY db ./db
+COPY domain ./domain
+COPY middleware ./middleware
+COPY models ./models
+COPY setup ./setup
+COPY templates ./templates
+COPY licenses ./licenses
 
 COPY --from=frontend-builder /app/web/dist /app/web/dist
 

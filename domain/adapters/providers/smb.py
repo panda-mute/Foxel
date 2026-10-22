@@ -131,15 +131,15 @@ class SMBAdapter:
             file = await self._smb_call(smbclient.open_file, path, mode="rb")
             remaining = length
             try:
-                await self._smb_call(file.seek, start)
+                await self._smb_call(file.seek, start, with_options=False)
                 while remaining:
-                    chunk = await self._smb_call(file.read, min(1024 * 1024, remaining))
+                    chunk = await self._smb_call(file.read, min(1024 * 1024, remaining), with_options=False)
                     if not chunk:
                         raise IOError("SMB file was truncated during download")
                     remaining -= len(chunk)
                     yield chunk
             finally:
-                await self._smb_call(file.close)
+                await self._smb_call(file.close, with_options=False)
 
         headers = {"Content-Length": str(length), "Accept-Ranges": "bytes"}
         if range_header:
@@ -162,12 +162,12 @@ class SMBAdapter:
         try:
             async for chunk in data_iter:
                 if chunk:
-                    written = await self._smb_call(file.write, chunk)
+                    written = await self._smb_call(file.write, chunk, with_options=False)
                     if written != len(chunk):
                         raise IOError("Incomplete SMB write")
                     size += written
         finally:
-            await self._smb_call(file.close)
+            await self._smb_call(file.close, with_options=False)
         return size
 
     async def write_upload_file(self, root, rel, file_obj, filename=None, file_size=None, content_type=None):
