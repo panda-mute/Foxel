@@ -52,8 +52,12 @@ jobs:
           elif [[ $GITHUB_REF == refs/tags/* ]]; then
             VERSION=${GITHUB_REF#refs/tags/}
             DOCKER_TAGS="ghcr.io/${REPO_LC}:${VERSION}"
-          else
+          elif [[ $GITHUB_REF == refs/heads/main ]]; then
             DOCKER_TAGS="ghcr.io/${REPO_LC}:dev"
+          else
+            # Other branches get their own tag so main and upstream-sync builds cannot overwrite them.
+            BRANCH_TAG=$(echo "${GITHUB_REF#refs/heads/}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_.-]+/-/g')
+            DOCKER_TAGS="ghcr.io/${REPO_LC}:branch-${BRANCH_TAG}"
           fi
           # Only main and release tags move :latest, which users pull by default.
           if [[ $GITHUB_REF == refs/tags/* || ( $GITHUB_REF == refs/heads/main && "$IMAGE_TAG" != "latest" ) ]]; then

@@ -385,6 +385,14 @@ class TelegramAdapter:
             raise self._flood_wait_http_exception(exc)
 
     async def read_file_range(self, root: str, rel: str, start: int, end: Optional[int] = None) -> bytes:
+        return await self._read_range(rel, start, end, self._download_lock, disconnect_on_flood=True)
+
+    async def read_thumbnail_range(self, root: str, rel: str, start: int, end: Optional[int] = None) -> bytes:
+        # Thumbnail reads must not wait for an active video stream, and a flood wait here must not
+        # disconnect the shared client out from under that stream.
+        return await self._read_range(rel, start, end, self._thumb_semaphore, disconnect_on_flood=False)
+
+    async def _read_range(self, rel: str, start: int, end: Optional[int], gate, *, disconnect_on_flood: bool) -> bytes:
         from fastapi import HTTPException
 
         message_id = self._parse_message_id(rel)
@@ -412,7 +420,7 @@ class TelegramAdapter:
         limit = end - start + 1
         data = bytearray()
         try:
-            async with self._download_lock:
+            async with gate:
                 async for chunk in client.iter_download(
                     media,
                     offset=start,
@@ -430,7 +438,8 @@ class TelegramAdapter:
                         break
             return bytes(data)
         except errors.FloodWaitError as exc:
-            await self._disconnect_shared_client()
+            if disconnect_on_flood:
+                await self._disconnect_shared_client()
             raise self._flood_wait_http_exception(exc)
 
     async def write_file(self, root: str, rel: str, data: bytes):
@@ -544,7 +553,7 @@ class TelegramAdapter:
             async with self._thumb_semaphore:
                 return await client.download_media(message, file=bytes, thumb=thumb)
         except errors.FloodWaitError as exc:
-            await self._disconnect_shared_client()
+            # Keep the shared client connected: thumbnails can now run alongside a video stream.
             raise self._flood_wait_http_exception(exc)
 
     async def delete(self, root: str, rel: str):

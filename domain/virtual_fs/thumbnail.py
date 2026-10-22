@@ -4,6 +4,7 @@ import io
 import hashlib
 import subprocess
 import tempfile
+import time
 from contextlib import suppress
 from pathlib import Path
 from typing import Tuple
@@ -22,6 +23,7 @@ VIDEO_HEAD_LIMIT = 2 * 1024 * 1024  # 2MB
 VIDEO_HEAD_FALLBACK_LIMIT = 4 * 1024 * 1024  # 4MB
 VIDEO_THUMB_SEEK_SECONDS = (1, 3, 5, 10, 15, 0)
 VIDEO_BLACK_FRAME_MEAN_THRESHOLD = 12.0
+VIDEO_THUMB_FAILURE_TTL = 60 * 60  # seconds before a failed video thumbnail is retried
 CACHE_ROOT = Path('data/.thumb_cache')
 THUMB_CACHE_VERSION = "v3"
 
@@ -214,7 +216,8 @@ async def _collect_response_bytes(response, limit: int) -> bytes:
 
 
 async def _read_range_slice(adapter, root: str, rel: str, start: int, end: int) -> bytes:
-    read_range = getattr(adapter, "read_file_range", None)
+    # Adapters may offer a thumbnail-specific reader that avoids contention with file streams.
+    read_range = getattr(adapter, "read_thumbnail_range", None) or getattr(adapter, "read_file_range", None)
     if callable(read_range):
         try:
             return await read_range(root, rel, start, end)
@@ -463,32 +466,44 @@ async def get_or_create_thumb(adapter, adapter_id: int, root: str, rel: str, w: 
                     print(f"Video tail read failed: {e}")
                     raise HTTPException(500, detail=f"Video read failed: {e}")
 
-            head_bytes = await _read_head(VIDEO_HEAD_LIMIT)
-            tail_bytes, tail_offset = await _read_tail(VIDEO_TAIL_LIMIT)
-            if not head_bytes and not tail_bytes:
-                raise HTTPException(500, detail="Unable to read video data for thumbnail")
+            failure_marker = path.with_suffix(".fail")
+            with suppress(FileNotFoundError):
+                if time.time() - failure_marker.stat().st_mtime < VIDEO_THUMB_FAILURE_TTL:
+                    raise HTTPException(404, detail="Video thumbnail unavailable (recent failure)")
 
             try:
-                thumb_bytes, mime = await _generate_video_thumb_from_segments(
-                    head_bytes, tail_bytes, tail_offset, rel, w, h, fit
-                )
-            except Exception as e1:
-                if _is_hevc_decoder_missing(e1):
-                    got = await _maybe_transcoding_thumb()
-                    if got is not None:
-                        thumb_bytes, mime = got
-                if not thumb_bytes:
-                    try:
-                        head_bytes = await _read_head(VIDEO_HEAD_FALLBACK_LIMIT)
-                        tail_bytes, tail_offset = await _read_tail(VIDEO_TAIL_FALLBACK_LIMIT)
-                        thumb_bytes, mime = await _generate_video_thumb_from_segments(
-                            head_bytes, tail_bytes, tail_offset, rel, w, h, fit
-                        )
-                    except HTTPException:
-                        raise
-                    except Exception as e2:
-                        print(f"Video thumbnail generation failed: {e2}")
-                        raise HTTPException(500, detail=f"Video thumbnail generation failed: {e2}")
+                head_bytes = await _read_head(VIDEO_HEAD_LIMIT)
+                tail_bytes, tail_offset = await _read_tail(VIDEO_TAIL_LIMIT)
+                if not head_bytes and not tail_bytes:
+                    raise HTTPException(500, detail="Unable to read video data for thumbnail")
+
+                try:
+                    thumb_bytes, mime = await _generate_video_thumb_from_segments(
+                        head_bytes, tail_bytes, tail_offset, rel, w, h, fit
+                    )
+                except Exception as e1:
+                    if _is_hevc_decoder_missing(e1):
+                        got = await _maybe_transcoding_thumb()
+                        if got is not None:
+                            thumb_bytes, mime = got
+                    if not thumb_bytes:
+                        try:
+                            head_bytes = await _read_head(VIDEO_HEAD_FALLBACK_LIMIT)
+                            tail_bytes, tail_offset = await _read_tail(VIDEO_TAIL_FALLBACK_LIMIT)
+                            thumb_bytes, mime = await _generate_video_thumb_from_segments(
+                                head_bytes, tail_bytes, tail_offset, rel, w, h, fit
+                            )
+                        except HTTPException:
+                            raise
+                        except Exception as e2:
+                            print(f"Video thumbnail generation failed: {e2}")
+                            raise HTTPException(500, detail=f"Video thumbnail generation failed: {e2}")
+            except HTTPException as exc:
+                # Remember hard failures so each listing does not re-download the same video segments.
+                # Rate limits (429) and other client errors are not cached.
+                if exc.status_code >= 500:
+                    failure_marker.touch()
+                raise
 
             if thumb_bytes and _is_black_image_bytes(thumb_bytes):
                 try:
