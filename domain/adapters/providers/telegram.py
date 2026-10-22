@@ -1,6 +1,7 @@
 from typing import List, Dict, Tuple, AsyncIterator, Optional
 import asyncio
 import base64
+import contextlib
 import io
 import mimetypes
 import os
@@ -647,14 +648,23 @@ class TelegramAdapter:
                     limit = end - start + 1
                     if self._active_stream_message_id != message_id:
                         return
-                    async with self._download_lock:
-                        async for chunk in client.iter_download(
-                            media,
-                            offset=start,
-                            request_size=self._download_chunk_size,
-                            chunk_size=self._download_chunk_size,
-                            file_size=file_size,
-                        ):
+                    chunks = client.iter_download(
+                        media,
+                        offset=start,
+                        request_size=self._download_chunk_size,
+                        chunk_size=self._download_chunk_size,
+                        file_size=file_size,
+                    )
+                    try:
+                        while True:
+                            # Hold the lock only while fetching from Telegram, never across a yield:
+                            # a paused browser connection would otherwise block the next range
+                            # request (e.g. for a moov box at the end of the file) indefinitely.
+                            async with self._download_lock:
+                                try:
+                                    chunk = await chunks.__anext__()
+                                except StopAsyncIteration:
+                                    break
                             if self._active_stream_message_id != message_id:
                                 return
                             if not chunk:
@@ -667,6 +677,11 @@ class TelegramAdapter:
                             yield data
                             if downloaded >= limit:
                                 break
+                    finally:
+                        close = getattr(chunks, "close", None)
+                        if callable(close):
+                            with contextlib.suppress(Exception):
+                                await close()
                 except errors.FloodWaitError as exc:
                     await self._disconnect_shared_client()
                     if downloaded == 0:
