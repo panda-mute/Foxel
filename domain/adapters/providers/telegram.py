@@ -351,7 +351,7 @@ class TelegramAdapter:
                         "size": size,
                         "mtime": int(message.date.timestamp()),
                         "type": "file",
-                        "has_thumbnail": False,
+                        "has_thumbnail": self._message_has_thumbnail(message),
                     })
                     if len(entries) >= page_size:
                         break
@@ -523,7 +523,20 @@ class TelegramAdapter:
         raise NotImplementedError("Telegram 适配器不支持创建目录。")
 
     async def get_thumbnail(self, root: str, rel: str, size: str = "medium"):
-        return None
+        message_id = self._parse_message_id(rel)
+        message = await self._get_cached_message(message_id)
+        if not message:
+            raise FileNotFoundError(rel)
+        thumb = self._pick_photo_thumb(self._get_message_thumbs(message))
+        if thumb is None:
+            return None
+        client = await self._get_connected_client()
+        try:
+            async with self._download_lock:
+                return await client.download_media(message, file=bytes, thumb=thumb)
+        except errors.FloodWaitError as exc:
+            await self._disconnect_shared_client()
+            raise self._flood_wait_http_exception(exc)
 
     async def delete(self, root: str, rel: str):
         """删除一个文件 (即一条消息)"""
@@ -689,7 +702,7 @@ class TelegramAdapter:
             "size": size,
             "mtime": int(message.date.timestamp()),
             "type": "file",
-            "has_thumbnail": False,
+            "has_thumbnail": self._message_has_thumbnail(message),
         }
 
 def ADAPTER_FACTORY(rec: StorageAdapter) -> TelegramAdapter:
