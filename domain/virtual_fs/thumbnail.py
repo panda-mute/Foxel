@@ -2,6 +2,7 @@ import asyncio
 import inspect
 import io
 import hashlib
+import struct
 import subprocess
 import tempfile
 import time
@@ -24,6 +25,9 @@ VIDEO_HEAD_FALLBACK_LIMIT = 4 * 1024 * 1024  # 4MB
 VIDEO_THUMB_SEEK_SECONDS = (1, 3, 5, 10, 15, 0)
 VIDEO_BLACK_FRAME_MEAN_THRESHOLD = 12.0
 VIDEO_THUMB_FAILURE_TTL = 60 * 60  # seconds before a failed video thumbnail is retried
+ISO_BMFF_VIDEO_EXT = {"mp4", "mov", "m4v", "3gp"}
+VIDEO_MOOV_MAX_SIZE = 64 * 1024 * 1024
+VIDEO_MAX_TOP_LEVEL_BOXES = 64
 CACHE_ROOT = Path('data/.thumb_cache')
 THUMB_CACHE_VERSION = "v3"
 
@@ -258,6 +262,33 @@ async def _read_video_tail(adapter, root: str, rel: str, size: int, limit: int) 
     return data, start
 
 
+async def _locate_mp4_moov(adapter, root: str, rel: str, size: int, head: bytes) -> Tuple[int, int] | None:
+    """Walk top-level ISO BMFF boxes to find moov; headers beyond head are fetched with ranged reads."""
+    offset = 0
+    for _ in range(VIDEO_MAX_TOP_LEVEL_BOXES):
+        if offset + 8 > size:
+            return None
+        if offset + 16 <= len(head):
+            header = head[offset:offset + 16]
+        else:
+            header = await _read_range_slice(adapter, root, rel, offset, min(offset + 15, size - 1))
+        if len(header) < 8:
+            return None
+        box_size, box_type = struct.unpack(">I4s", header[:8])
+        if box_size == 1:
+            if len(header) < 16:
+                return None
+            box_size = struct.unpack(">Q", header[8:16])[0]
+        elif box_size == 0:
+            box_size = size - offset
+        if box_size < 8:
+            return None
+        if box_type == b"moov":
+            return offset, box_size
+        offset += box_size
+    return None
+
+
 def _write_video_sparse_file(rel: str, head_bytes: bytes, tail_bytes: bytes, tail_offset: int) -> str:
     suffix = Path(rel).suffix or ".mp4"
     src_tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
@@ -466,6 +497,38 @@ async def get_or_create_thumb(adapter, adapter_id: int, root: str, rel: str, w: 
                     print(f"Video tail read failed: {e}")
                     raise HTTPException(500, detail=f"Video read failed: {e}")
 
+            moov_memo: dict = {}
+
+            async def _read_index(limit: int, head_bytes: bytes) -> Tuple[bytes, int]:
+                # For MP4/MOV, fetch exactly the moov box. A fixed tail window misses it when the box
+                # is larger than the window or is followed by other boxes.
+                if rel.rsplit(".", 1)[-1].lower() not in ISO_BMFF_VIDEO_EXT:
+                    return await _read_tail(limit)
+                if "loc" not in moov_memo:
+                    try:
+                        moov_memo["loc"] = await _locate_mp4_moov(adapter, root, rel, size, head_bytes)
+                    except HTTPException:
+                        raise
+                    except Exception as e:
+                        print(f"Video moov lookup failed for {rel}: {e}")
+                        moov_memo["loc"] = None
+                loc = moov_memo["loc"]
+                if loc is None or loc[1] > VIDEO_MOOV_MAX_SIZE:
+                    return await _read_tail(limit)
+                moov_offset, moov_size = loc
+                if moov_offset + moov_size <= len(head_bytes):
+                    return b"", 0
+                if "data" not in moov_memo:
+                    try:
+                        moov_memo["data"] = await _read_range_slice(
+                            adapter, root, rel, moov_offset, moov_offset + moov_size - 1)
+                    except HTTPException:
+                        raise
+                    except Exception as e:
+                        print(f"Video moov read failed: {e}")
+                        raise HTTPException(500, detail=f"Video read failed: {e}")
+                return moov_memo["data"], moov_offset
+
             failure_marker = path.with_suffix(".fail")
             with suppress(FileNotFoundError):
                 if time.time() - failure_marker.stat().st_mtime < VIDEO_THUMB_FAILURE_TTL:
@@ -473,7 +536,7 @@ async def get_or_create_thumb(adapter, adapter_id: int, root: str, rel: str, w: 
 
             try:
                 head_bytes = await _read_head(VIDEO_HEAD_LIMIT)
-                tail_bytes, tail_offset = await _read_tail(VIDEO_TAIL_LIMIT)
+                tail_bytes, tail_offset = await _read_index(VIDEO_TAIL_LIMIT, head_bytes)
                 if not head_bytes and not tail_bytes:
                     raise HTTPException(500, detail="Unable to read video data for thumbnail")
 
@@ -489,7 +552,7 @@ async def get_or_create_thumb(adapter, adapter_id: int, root: str, rel: str, w: 
                     if not thumb_bytes:
                         try:
                             head_bytes = await _read_head(VIDEO_HEAD_FALLBACK_LIMIT)
-                            tail_bytes, tail_offset = await _read_tail(VIDEO_TAIL_FALLBACK_LIMIT)
+                            tail_bytes, tail_offset = await _read_index(VIDEO_TAIL_FALLBACK_LIMIT, head_bytes)
                             thumb_bytes, mime = await _generate_video_thumb_from_segments(
                                 head_bytes, tail_bytes, tail_offset, rel, w, h, fit
                             )
