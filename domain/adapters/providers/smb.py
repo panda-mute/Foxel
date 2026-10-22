@@ -36,6 +36,7 @@ class SMBAdapter:
         self.base = "\\\\" + self.server.strip("\\/") + "\\" + self.share.replace("/", "\\")
         self._options = {"username": self.username, "password": self.password, "port": self.port,
                          "connection_timeout": self.timeout, "connection_cache": {}}
+        self._operation_lock = asyncio.Lock()
         if self.guest:
             # Guest sessions are negotiated after failed credentials and cannot sign or encrypt.
             self._options.update(auth_protocol="ntlm", encrypt=False, require_signing=False)
@@ -50,6 +51,10 @@ class SMBAdapter:
     async def _call(self, func, *args, **kwargs):
         return await asyncio.to_thread(func, *args, **kwargs)
 
+    async def _smb_call(self, func, *args, **kwargs):
+        async with self._operation_lock:
+            return await asyncio.to_thread(func, *args, **kwargs, **self._options)
+
     async def list_dir(self, root, rel, page_num=1, page_size=50, sort_by="name", sort_order="asc"):
         path = self._path(root, rel)
         def scan():
@@ -60,13 +65,13 @@ class SMBAdapter:
                     is_dir = statmod.S_ISDIR(info.st_mode)
                     result.append(entry(item.name, is_dir, info.st_size, info.st_mtime, path=item.path))
             return result
-        items = await self._call(scan)
+        items = await self._smb_call(scan)
         return paginate(items, page_num, page_size, sort_by, sort_order)
 
     async def stat_file(self, root, rel):
         path = self._path(root, rel)
         try:
-            info = await self._call(smbclient.stat, path, follow_symlinks=False, **self._options)
+            info = await self._smb_call(smbclient.stat, path, follow_symlinks=False)
         except FileNotFoundError:
             raise FileNotFoundError(rel)
         return entry(posixpath.basename(clean_path(rel)), statmod.S_ISDIR(info.st_mode), info.st_size, info.st_mtime,
@@ -91,7 +96,7 @@ class SMBAdapter:
         def read():
             with smbclient.open_file(path, mode="rb", **self._options) as file:
                 return file.read()
-        return await self._call(read)
+        return await self._smb_call(read)
 
     async def stream_file(self, root, rel, range_header):
         item = await self.stat_file(root, rel)
@@ -121,18 +126,18 @@ class SMBAdapter:
         length = max(0, end - start + 1)
 
         async def body():
-            file = await self._call(smbclient.open_file, path, mode="rb", **self._options)
+            file = await self._smb_call(smbclient.open_file, path, mode="rb")
             remaining = length
             try:
-                await self._call(file.seek, start)
+                await self._smb_call(file.seek, start)
                 while remaining:
-                    chunk = await self._call(file.read, min(1024 * 1024, remaining))
+                    chunk = await self._smb_call(file.read, min(1024 * 1024, remaining))
                     if not chunk:
                         raise IOError("SMB file was truncated during download")
                     remaining -= len(chunk)
                     yield chunk
             finally:
-                await self._call(file.close)
+                await self._smb_call(file.close)
 
         headers = {"Content-Length": str(length), "Accept-Ranges": "bytes"}
         if range_header:
@@ -149,18 +154,18 @@ class SMBAdapter:
         if not clean_path(rel):
             raise ValueError("Cannot overwrite mount root")
         path = self._path(root, rel)
-        await self._call(smbclient.makedirs, path.rsplit("\\", 1)[0], exist_ok=True, **self._options)
-        file = await self._call(smbclient.open_file, path, mode="wb", **self._options)
+        await self._smb_call(smbclient.makedirs, path.rsplit("\\", 1)[0], exist_ok=True)
+        file = await self._smb_call(smbclient.open_file, path, mode="wb")
         size = 0
         try:
             async for chunk in data_iter:
                 if chunk:
-                    written = await self._call(file.write, chunk)
+                    written = await self._smb_call(file.write, chunk)
                     if written != len(chunk):
                         raise IOError("Incomplete SMB write")
                     size += written
         finally:
-            await self._call(file.close)
+            await self._smb_call(file.close)
         return size
 
     async def write_upload_file(self, root, rel, file_obj, filename=None, file_size=None, content_type=None):
@@ -171,20 +176,20 @@ class SMBAdapter:
         return {"size": await self.write_file_stream(root, rel, chunks())}
 
     async def mkdir(self, root, rel):
-        await self._call(smbclient.makedirs, self._path(root, rel), exist_ok=False, **self._options)
+        await self._smb_call(smbclient.makedirs, self._path(root, rel), exist_ok=False)
 
     async def delete(self, root, rel):
         if not clean_path(rel):
             raise ValueError("Cannot delete mount root")
         item = await self.stat_file(root, rel)
         path = self._path(root, rel)
-        await self._call(smb_shutil.rmtree if item["is_dir"] else smbclient.remove, path, **self._options)
+        await self._smb_call(smb_shutil.rmtree if item["is_dir"] else smbclient.remove, path)
 
     async def move(self, root, src_rel, dst_rel):
         self._validate_transfer(src_rel, dst_rel)
         if await self.exists(root, dst_rel):
             raise FileExistsError(dst_rel)
-        await self._call(smbclient.rename, self._path(root, src_rel), self._path(root, dst_rel), **self._options)
+        await self._smb_call(smbclient.rename, self._path(root, src_rel), self._path(root, dst_rel))
 
     async def rename(self, root, src_rel, dst_rel):
         return await self.move(root, src_rel, dst_rel)
@@ -199,10 +204,10 @@ class SMBAdapter:
         target = self._path(root, dst_rel)
         item = await self.stat_file(root, src_rel)
         if item["is_dir"]:
-            await self._call(smb_shutil.copytree, source, target, **self._options)
+            await self._smb_call(smb_shutil.copytree, source, target)
         else:
-            await self._call(smbclient.makedirs, target.rsplit("\\", 1)[0], exist_ok=True, **self._options)
-            await self._call(smb_shutil.copyfile, source, target, **self._options)
+            await self._smb_call(smbclient.makedirs, target.rsplit("\\", 1)[0], exist_ok=True)
+            await self._smb_call(smb_shutil.copyfile, source, target)
 
     @staticmethod
     def _validate_transfer(src, dst):
