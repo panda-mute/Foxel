@@ -402,7 +402,14 @@ async def get_or_create_thumb(adapter, adapter_id: int, root: str, rel: str, w: 
 
     if should_try_native_thumb:
         size_str = "large" if w > 400 else "medium" if w > 100 else "small"
-        native_thumb_bytes = await get_thumb_impl(root, rel, size_str)
+        try:
+            native_thumb_bytes = await get_thumb_impl(root, rel, size_str)
+        except HTTPException:
+            raise
+        except Exception as e:
+            # A failed native thumb must not block the ffmpeg fallback below.
+            print(f"Native thumbnail fetch failed for {rel}: {e}, falling back.")
+            native_thumb_bytes = None
 
         if native_thumb_bytes:
             try:
