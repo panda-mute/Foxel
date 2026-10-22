@@ -170,8 +170,13 @@ class TelegramAdapter:
         return []
 
     @classmethod
-    def _message_has_thumbnail(cls, message) -> bool:
-        return cls._pick_photo_thumb(cls._get_message_thumbs(message)) is not None
+    def _message_has_thumbnail(cls, message, filename: str = "") -> bool:
+        if cls._pick_photo_thumb(cls._get_message_thumbs(message)) is not None:
+            return True
+        # Images and videos without a Telegram thumb can still use the ffmpeg/Pillow fallback,
+        # and the file explorer only requests thumbnails for entries flagged here.
+        from domain.virtual_fs.thumbnail import is_image_filename, is_video_filename
+        return is_image_filename(filename) or is_video_filename(filename)
 
     def _build_session(self) -> StringSession:
         s = (self.session_string or "").strip()
@@ -358,7 +363,7 @@ class TelegramAdapter:
                         "size": size,
                         "mtime": int(message.date.timestamp()),
                         "type": "file",
-                        "has_thumbnail": self._message_has_thumbnail(message),
+                        "has_thumbnail": self._message_has_thumbnail(message, filename),
                     })
                     if len(entries) >= page_size:
                         break
@@ -720,7 +725,7 @@ class TelegramAdapter:
             "size": size,
             "mtime": int(message.date.timestamp()),
             "type": "file",
-            "has_thumbnail": self._message_has_thumbnail(message),
+            "has_thumbnail": self._message_has_thumbnail(message, filename),
         }
 
 def ADAPTER_FACTORY(rec: StorageAdapter) -> TelegramAdapter:
