@@ -40,6 +40,9 @@ class SMBAdapter:
         if self.guest:
             # Guest sessions are negotiated after failed credentials and cannot sign or encrypt.
             self._options.update(auth_protocol="ntlm", encrypt=False, require_signing=False)
+            # Guest sessions have no signing key, so smbprotocol cannot verify negotiate info on
+            # tree connect. This setting is process-wide in smbclient and is not per adapter.
+            smbclient.ClientConfig(require_secure_negotiate=False)
 
     def get_effective_root(self, sub_path):
         return "/".join(filter(None, (self.root, clean_path(sub_path))))
